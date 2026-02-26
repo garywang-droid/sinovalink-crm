@@ -592,10 +592,11 @@ const PipelineView = ({ campaigns, allLeads, user, knownUsers, showToast, allPro
   const handleQuickUpdateC = (camp, roundId, acc, currentVal) => {
       const currentRound = camp.rounds.find(r => r.id === roundId);
       const allocated = currentRound?.accountStats?.[acc]?.allocated || 0;
+      const reached = currentRound?.accountStats?.[acc]?.reached || 0;
 
       setDialogConfig({
           title: `更新回关数`,
-          content: `请输入执行账号 [${acc}] 的最新 C级 回关总数 (上限: ${allocated}):`,
+          content: `请输入执行账号 [${acc}] 的最新 C级 回关总数 (上限不能超过触达数: ${reached || allocated}):`,
           type: 'prompt-number',
           defaultValue: currentVal,
           onConfirm: async (val) => {
@@ -605,6 +606,10 @@ const PipelineView = ({ campaigns, allLeads, user, knownUsers, showToast, allPro
                       showToast(`⚠️ 错误：回关数 (${numVal}) 绝不能大于分配配额数 (${allocated})`);
                       return;
                   }
+                  if (reached > 0 && numVal > reached) {
+                      showToast(`⚠️ 逻辑警告：回关数 (${numVal}) 不应大于已触达数 (${reached})`);
+                      return;
+                  }
                   try {
                      const updatedRounds = camp.rounds.map(r => {
                          if (r.id !== roundId) return r;
@@ -612,6 +617,36 @@ const PipelineView = ({ campaigns, allLeads, user, knownUsers, showToast, allPro
                      });
                      await FirebaseService.updateCampaign(camp.dbId, { rounds: updatedRounds });
                      showToast('回关数据已更新');
+                  } catch(e) { showToast('更新失败'); }
+              }
+          }
+      });
+  };
+
+  // 新增：触达量独立更新控制
+  const handleQuickUpdateReached = (camp, roundId, acc, currentVal) => {
+      const currentRound = camp.rounds.find(r => r.id === roundId);
+      const allocated = currentRound?.accountStats?.[acc]?.allocated || 0;
+
+      setDialogConfig({
+          title: `更新触达量`,
+          content: `请输入执行账号 [${acc}] 的最新已触达总数 (配额上限: ${allocated}):`,
+          type: 'prompt-number',
+          defaultValue: currentVal || 0,
+          onConfirm: async (val) => {
+              if(val!==null && !isNaN(val) && val !== '') {
+                  const numVal = parseInt(val);
+                  if (numVal > allocated) {
+                      showToast(`⚠️ 错误：触达数 (${numVal}) 绝不能大于分配配额数 (${allocated})`);
+                      return;
+                  }
+                  try {
+                     const updatedRounds = camp.rounds.map(r => {
+                         if (r.id !== roundId) return r;
+                         return { ...r, accountStats: { ...r.accountStats, [acc]: { ...r.accountStats[acc], reached: numVal, updatedAt: new Date().toISOString(), updatedBy: user.role } } };
+                     });
+                     await FirebaseService.updateCampaign(camp.dbId, { rounds: updatedRounds });
+                     showToast('触达进度已更新');
                   } catch(e) { showToast('更新失败'); }
               }
           }
@@ -662,6 +697,7 @@ const PipelineView = ({ campaigns, allLeads, user, knownUsers, showToast, allPro
                   {safeRounds.map((round, idx) => {
                       const stats = Object.values(round.accountStats || {});
                       const totalAlloc = stats.reduce((sum, st) => sum + (st.allocated || 0), 0);
+                      const totalReached = stats.reduce((sum, st) => sum + (st.reached || 0), 0); // 新增全量触达数计算
                       const totalC = stats.reduce((sum, st) => sum + (st.cCount || 0), 0);
                       
                       // 核心修复 5：加入时间阀门，只统计属于当前轮次期间诞生的 B 级线索
@@ -678,14 +714,14 @@ const PipelineView = ({ campaigns, allLeads, user, knownUsers, showToast, allPro
                       
                       const rate0 = round.companyCount ? ((round.foundCompanyCount || 0) / round.companyCount * 100).toFixed(0) : 0;
                       const rate1 = round.foundCompanyCount ? ((round.contactCount || 0) / round.foundCompanyCount * 100).toFixed(0) : 0;
-                      const rate2 = round.contactCount ? (totalAlloc / round.contactCount * 100).toFixed(0) : 0;
-                      const rate3 = totalAlloc ? (totalC / totalAlloc * 100).toFixed(0) : 0;
+                      const rate2 = round.contactCount ? (totalReached / round.contactCount * 100).toFixed(0) : 0; // 联系人 -> 触达的进度率
+                      const rate3 = totalReached ? (totalC / totalReached * 100).toFixed(0) : 0; // 触达 -> 回关率
                       const rate4 = totalC ? (bCount / totalC * 100).toFixed(0) : 0;
 
                       return (
                         <div key={round.id} className="flex flex-col pb-4 mb-4 border-b border-slate-100 last:border-0">
                           <div className="p-4 flex justify-between items-center cursor-pointer hover:bg-slate-50 rounded-xl" onClick={()=>setExpandedRoundId(expandedRoundId===round.id?null:round.id)}>
-                             <div className="flex items-center gap-2 md:gap-4 w-full">
+                             <div className="flex items-center gap-2 md:gap-4 w-full flex-wrap md:flex-nowrap">
                                 
                                 {/* === 新增：轮次标识与自定义备注 === */}
                                 <div className="w-20 md:w-28 shrink-0 flex flex-col justify-center border-r border-slate-200/50 pr-2 md:pr-4">
@@ -717,11 +753,12 @@ const PipelineView = ({ campaigns, allLeads, user, knownUsers, showToast, allPro
                                 
                                 <div className="hidden md:flex flex-col justify-center px-1 text-[10px] text-slate-400 font-mono items-center opacity-60"><ArrowRight size={12}/>{rate2}%</div>
                                 
-                                <div className="w-1/3 md:flex-1 px-2 flex flex-col justify-center border-r border-slate-200/50">
-                                  <div className="text-[10px] font-bold text-slate-400 mb-1 uppercase tracking-wide">Allocated (D)</div>
-                                  <div className="text-2xl font-black text-slate-800">{totalAlloc}</div>
+                                {/* 恢复版式：点击 Reached 直接打开账号分配与明细管理 */}
+                                <div className="w-1/3 md:flex-1 px-2 flex flex-col justify-center border-r border-slate-200/50 relative group" onClick={(e)=>{e.stopPropagation(); setActionModalData({type:'ALLOC', camp, roundId: round.id});}}>
+                                  <div className="text-[10px] font-bold text-slate-400 mb-1 uppercase tracking-wide group-hover:text-blue-500 transition-colors">Reached 触达</div>
+                                  <div className="text-2xl font-black text-blue-600">{totalReached}</div>
                                 </div>
-                                
+
                                 <div className="hidden md:flex flex-col justify-center px-1 text-[10px] text-slate-400 font-mono items-center opacity-60"><ArrowRight size={12}/>{rate3}%</div>
                                 
                                 <div className="w-1/3 md:flex-1 px-2 flex flex-col justify-center border-r border-slate-200/50">
@@ -741,17 +778,29 @@ const PipelineView = ({ campaigns, allLeads, user, knownUsers, showToast, allPro
                       {expandedRoundId === round.id && (
                         <div className="bg-white p-4 animate-in slide-in-from-top-2">
                           <table className="w-full text-left text-sm mb-4 bg-white border border-slate-200 rounded-xl overflow-hidden shadow-sm">
-                            <thead className="bg-slate-50 border-b border-slate-200 text-xs text-slate-500 uppercase font-bold"><tr><th className="p-3 pl-4">执行账号</th><th className="p-3">负责人</th><th className="p-3 text-right">配额 (D)</th><th className="p-3 text-right">回关 (C)</th><th className="p-3 text-right">转化率</th><th className="p-3 text-center">操作</th></tr></thead>
+                            <thead className="bg-slate-50 border-b border-slate-200 text-xs text-slate-500 uppercase font-bold">
+                                <tr>
+                                    <th className="p-3 pl-4">执行账号</th>
+                                    <th className="p-3">负责人</th>
+                                    <th className="p-3 text-right">配额(D)</th>
+                                    <th className="p-3 text-right text-blue-600">已触达</th>
+                                    <th className="p-3 text-right">回关(C)</th>
+                                    <th className="p-3 text-center">双项进度操作</th>
+                                </tr>
+                            </thead>
                             <tbody className="divide-y divide-slate-100">
                               {Object.entries(round.accountStats||{}).map(([acc, st]) => (
                                 <tr key={acc} className="hover:bg-slate-50/50 transition-colors">
                                   <td className="p-3 pl-4 font-bold text-slate-800 font-mono">{acc}</td>
                                   <td className="p-3 text-xs font-bold text-slate-600"><span className="bg-slate-100 px-2 py-1 rounded">{knownUsers[st.operator]||st.operator}</span></td>
                                   <td className="p-3 text-right font-mono font-bold text-slate-600">{st.allocated}</td>
+                                  <td className="p-3 text-right font-mono text-blue-600 font-black text-base">{st.reached || 0}</td>
                                   <td className="p-3 text-right font-mono text-yellow-600 font-black text-base">{st.cCount}</td>
-                                  <td className="p-3 text-right font-mono text-xs font-bold">{st.allocated?((st.cCount/st.allocated)*100).toFixed(1):0}%</td>
                                   <td className="p-3 text-center">
-                                     <button onClick={()=>handleQuickUpdateC(camp, round.id, acc, st.cCount)} className="text-xs font-bold bg-white border border-slate-200 hover:bg-slate-100 text-slate-700 px-3 py-1.5 rounded-lg transition-colors shadow-sm">更新回关</button>
+                                     <div className="flex items-center justify-center gap-2">
+                                         <button onClick={()=>handleQuickUpdateReached(camp, round.id, acc, st.reached)} className="text-[11px] font-bold bg-blue-50 border border-blue-200 text-blue-700 hover:bg-blue-100 px-3 py-1.5 rounded-lg transition-colors shadow-sm">更触达</button>
+                                         <button onClick={()=>handleQuickUpdateC(camp, round.id, acc, st.cCount)} className="text-[11px] font-bold bg-white border border-slate-200 hover:bg-slate-100 text-slate-700 px-3 py-1.5 rounded-lg transition-colors shadow-sm">更回关</button>
+                                     </div>
                                   </td>
                                 </tr>
                               ))}
@@ -1226,7 +1275,6 @@ const CUpdateModal = ({ currentUser, campaigns, knownUsers, onClose, showToast, 
       (camp.rounds || []).filter(r => r.status === 'active').forEach(round => {
         if (round.accountStats) {
           Object.entries(round.accountStats).forEach(([acc, st]) => {
-            // 核心修复：权限控制严格生效
             if (currentUser.role === 'FD' || st.operator === currentUser.role) res.push({ camp, round, acc, ...st });
           });
         }
@@ -1235,40 +1283,45 @@ const CUpdateModal = ({ currentUser, campaigns, knownUsers, onClose, showToast, 
     return res.sort((a,b)=>new Date(b.round.createdAt) - new Date(a.round.createdAt));
   }, [campaigns, currentUser]);
 
-  const [updates, setUpdates] = useState({});
+  const [updatesR, setUpdatesR] = useState({});
+  const [updatesC, setUpdatesC] = useState({});
 
   const handleUpdate = async (campId, roundId, acc) => {
     try {
-      const newVal = updates[`${campId}_${roundId}_${acc}`];
-      if (newVal === undefined || newVal === '') return;
-      const numVal = parseInt(newVal);
-      
       const camp = campaigns.find(c => c.dbId === campId);
       if (!camp) return;
 
       const round = camp.rounds.find(r => r.id === roundId);
-      const allocated = round?.accountStats?.[acc]?.allocated || 0;
+      const st = round?.accountStats?.[acc];
+      const allocated = st?.allocated || 0;
 
-      if (numVal > allocated) {
-          showToast(`⚠️ 错误：回关数 (${numVal}) 绝不能大于该账号配额总数 (${allocated})`);
-          return;
-      }
+      const rStr = updatesR[`${campId}_${roundId}_${acc}`];
+      const cStr = updatesC[`${campId}_${roundId}_${acc}`];
+      
+      let newR = rStr !== undefined && rStr !== '' ? parseInt(rStr) : (st?.reached || 0);
+      let newC = cStr !== undefined && cStr !== '' ? parseInt(cStr) : (st?.cCount || 0);
+
+      // 严格防呆拦截逻辑
+      if (newR > allocated) return showToast(`⚠️ 触达数 (${newR}) 绝不能大于该账号配额 (${allocated})`);
+      if (newC > allocated) return showToast(`⚠️ 回关数 (${newC}) 绝不能大于该账号配额 (${allocated})`);
+      if (newR > 0 && newC > newR) return showToast(`⚠️ 回关数 (${newC}) 逻辑上不应大于已触达数 (${newR})`);
 
       const updatedRounds = camp.rounds.map(r => {
           if (r.id !== roundId) return r;
-          return { ...r, accountStats: { ...r.accountStats, [acc]: { ...r.accountStats[acc], cCount: numVal, updatedAt: new Date().toISOString(), updatedBy: currentUser.role } } };
+          return { ...r, accountStats: { ...r.accountStats, [acc]: { ...r.accountStats[acc], reached: newR, cCount: newC, updatedAt: new Date().toISOString(), updatedBy: currentUser.role } } };
       });
       await FirebaseService.updateCampaign(camp.dbId, { rounds: updatedRounds });
       showToast(`已更新 [${acc}]`);
-      setUpdates({...updates, [`${campId}_${roundId}_${acc}`]: ''});
+      setUpdatesR({...updatesR, [`${campId}_${roundId}_${acc}`]: ''});
+      setUpdatesC({...updatesC, [`${campId}_${roundId}_${acc}`]: ''});
     } catch (err) { showToast(`保存失败`); }
   };
 
   return (
     <div className="fixed inset-0 bg-slate-900/80 z-[100] flex items-center justify-center p-4 backdrop-blur-sm animate-in fade-in">
-      <div className="bg-white rounded-3xl shadow-2xl w-full max-w-4xl flex flex-col max-h-[85vh] zoom-in-95 overflow-hidden">
+      <div className="bg-white rounded-3xl shadow-2xl w-full max-w-5xl flex flex-col max-h-[85vh] zoom-in-95 overflow-hidden">
         <div className="p-6 border-b border-slate-100 flex justify-between items-center bg-slate-50">
-          <h3 className="font-black text-xl flex items-center gap-3 text-slate-800"><div className="p-2 bg-blue-100 text-blue-600 rounded-lg"><ListPlus size={20}/></div> 活跃战区 C 级回关速填</h3>
+          <h3 className="font-black text-xl flex items-center gap-3 text-slate-800"><div className="p-2 bg-blue-100 text-blue-600 rounded-lg"><ListPlus size={20}/></div> 执行进度速填 (触达/回关)</h3>
           <button onClick={onClose} className="p-2 hover:bg-slate-200 rounded-full transition-colors"><XCircle className="text-slate-400 hover:text-slate-600"/></button>
         </div>
         <div className="flex-1 overflow-auto p-6 bg-slate-50/50">
@@ -1276,7 +1329,7 @@ const CUpdateModal = ({ currentUser, campaigns, knownUsers, onClose, showToast, 
             <div className="bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden">
               <table className="w-full text-left text-sm whitespace-nowrap">
                 <thead className="bg-slate-100 text-slate-500 uppercase text-xs sticky top-0 shadow-sm z-10 font-bold tracking-wider">
-                  <tr><th className="p-4 pl-6">战役区 / 轮次</th><th className="p-4">执行账号</th><th className="p-4 text-center">当前 D 配额</th><th className="p-4 text-center">当前 C 数</th><th className="p-4 text-right pr-6">录入最新回关数 (C)</th></tr>
+                  <tr><th className="p-4 pl-6">战役区 / 轮次</th><th className="p-4">执行账号</th><th className="p-4 text-center">配额 (D)</th><th className="p-4 text-center">已触达量</th><th className="p-4 text-center">回关数 (C)</th><th className="p-4 pr-6 text-center">填报最新进度 (触达 / 回关)</th></tr>
                 </thead>
                 <tbody className="divide-y divide-slate-100">
                   {list.map(item => {
@@ -1286,11 +1339,14 @@ const CUpdateModal = ({ currentUser, campaigns, knownUsers, onClose, showToast, 
                         <td className="p-4 pl-6"><div className="font-bold text-slate-800 text-base">{item.camp.projectName}</div><div className="text-xs text-slate-500 mt-1"><span className="bg-slate-100 px-1.5 py-0.5 rounded text-[10px] font-bold">R{item.round.round}</span> · {item.camp.country}</div></td>
                         <td className="p-4"><div className="font-mono text-slate-800 font-bold">{item.acc}</div> <div className="text-[10px] text-slate-400 font-sans mt-1">OP: {knownUsers[item.operator]||item.operator}</div></td>
                         <td className="p-4 text-center font-mono font-bold text-slate-600">{item.allocated}</td>
+                        <td className="p-4 text-center font-mono font-black text-blue-600 text-lg">{item.reached || 0}</td>
                         <td className="p-4 text-center font-mono font-black text-yellow-600 text-lg">{item.cCount}</td>
                         <td className="p-4 pr-6">
-                           <div className="flex items-center justify-end gap-3">
-                             <input type="number" className="w-24 p-2 border border-slate-200 rounded-xl text-center text-sm focus:outline-blue-500 font-mono focus:ring-2 focus:ring-blue-500/20 bg-slate-50 focus:bg-white transition-all" placeholder={item.cCount} value={updates[uid]!==undefined ? updates[uid] : ''} onChange={e=>setUpdates({...updates, [uid]: e.target.value})}/>
-                             <button onClick={()=>handleUpdate(item.camp.dbId, item.round.id, item.acc)} className="bg-slate-900 text-white px-4 py-2 rounded-xl text-xs font-bold hover:bg-blue-600 transition-colors shadow-md">保存</button>
+                           <div className="flex items-center justify-end gap-2">
+                             <input type="number" className="w-16 p-2 border border-blue-200 rounded-xl text-center text-sm focus:outline-blue-500 font-mono focus:ring-2 focus:ring-blue-500/20 bg-blue-50 focus:bg-white transition-all text-blue-700 font-bold" placeholder="触达" value={updatesR[uid]!==undefined ? updatesR[uid] : ''} onChange={e=>setUpdatesR({...updatesR, [uid]: e.target.value})}/>
+                             <span className="text-slate-300 font-bold">/</span>
+                             <input type="number" className="w-16 p-2 border border-slate-200 rounded-xl text-center text-sm focus:outline-yellow-500 font-mono focus:ring-2 focus:ring-yellow-500/20 bg-slate-50 focus:bg-white transition-all text-yellow-700 font-bold" placeholder="回关" value={updatesC[uid]!==undefined ? updatesC[uid] : ''} onChange={e=>setUpdatesC({...updatesC, [uid]: e.target.value})}/>
+                             <button onClick={()=>handleUpdate(item.camp.dbId, item.round.id, item.acc)} className="bg-slate-900 text-white px-4 py-2 rounded-xl text-xs font-bold hover:bg-blue-600 transition-colors shadow-md ml-1">保存</button>
                            </div>
                         </td>
                       </tr>
@@ -1625,7 +1681,12 @@ export default function App() {
     let isMounted = true;
     const initAuth = async () => { 
       try {
-       await signInAnonymously(auth);
+        await signInAnonymously(auth);
+          try { await signInWithCustomToken(auth, __initial_auth_token); } 
+          catch (e) { await signInAnonymously(auth); }
+        } else {
+          await signInAnonymously(auth); 
+        }
         if (isMounted) setIsAuthReady(true);
       } catch (err) { console.error("Firebase auth err:", err); }
     };
@@ -1791,7 +1852,7 @@ export default function App() {
         </nav>
         <div className="p-4 bg-slate-900 border-t border-slate-800 space-y-3">
             <button onClick={()=>window.open('https://sinova-7cip.vercel.app/', '_blank')} className="w-full py-2.5 bg-blue-900/30 hover:bg-blue-800/50 text-xs font-bold text-blue-400 rounded-lg flex items-center justify-center gap-2 transition-colors border border-blue-800/50"><ExternalLink size={14}/> 外部业务看板 ↗</button>
-            <button onClick={()=>setModalType('C_STATS')} className="w-full py-2.5 bg-slate-800 hover:bg-slate-700 text-xs font-bold text-slate-300 rounded-lg flex items-center justify-center gap-2 transition-colors border border-slate-700"><ListPlus size={14}/> 更新 C 级回关速填</button>
+            <button onClick={()=>setModalType('C_STATS')} className="w-full py-2.5 bg-slate-800 hover:bg-slate-700 text-xs font-bold text-slate-300 rounded-lg flex items-center justify-center gap-2 transition-colors border border-slate-700"><ListPlus size={14}/> 执行进度速填 (触达/回关)</button>
             <div className="flex justify-between items-center pt-3 px-1 border-t border-slate-800/50">
               <div className="text-xs font-bold text-slate-400 font-mono"><span className="text-slate-300">{user.name}</span> <span className="text-slate-600">|</span> {user.role}</div>
               <button onClick={()=>{ setUser(null); showToast("已安全登出系统"); }} className="p-1.5 bg-slate-800 text-slate-400 hover:text-red-400 hover:bg-red-900/20 rounded transition-colors" title="安全退出"><LogOut size={14}/></button>
