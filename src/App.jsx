@@ -1682,11 +1682,6 @@ export default function App() {
     const initAuth = async () => { 
       try {
         await signInAnonymously(auth);
-          try { await signInWithCustomToken(auth, __initial_auth_token); } 
-          catch (e) { await signInAnonymously(auth); }
-        } else {
-          await signInAnonymously(auth); 
-        }
         if (isMounted) setIsAuthReady(true);
       } catch (err) { console.error("Firebase auth err:", err); }
     };
